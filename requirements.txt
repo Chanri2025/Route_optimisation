@@ -1,0 +1,9 @@
+Flask~=3.1.0
+flask-cors~=6.0.0
+requests~=2.32.3
+pandas~=2.2.3
+osmnx~=2.0.5
+networkx~=3.4.2
+folium~=0.20.0
+shapely~=2.1.1
+ortools~=9.14.6206
