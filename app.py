@@ -1,7 +1,6 @@
 from flask import Flask
 from flask_cors import CORS
 from routes.optimize_route import optimize_route_bp
-from routes.map_html import map_html_bp
 
 
 def create_app():
@@ -11,8 +10,7 @@ def create_app():
 
     # Register blueprints
     app.register_blueprint(optimize_route_bp)
-    app.register_blueprint(map_html_bp)
-
+    
     return app
 
 

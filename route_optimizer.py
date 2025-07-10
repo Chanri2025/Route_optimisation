@@ -155,79 +155,77 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
     # ─── Add return to depot ────────────────────────────────────────────────────
     visit_sequence.append(('Depot', depot_coord, 'Ending Point'))
 
-    # ─── 7) Draw map with two view options ─────────────────────────────────────
-    center = manual_center if manual_center else depot_coord
-    m = folium.Map(location=center, zoom_start=15, tiles=None)
-    folium.TileLayer('OpenStreetMap', name='Map View', control=True).add_to(m)
-    folium.TileLayer('Esri.WorldImagery', name='Satellite View', control=True).add_to(m)
-    folium.Polygon(locations=fence_coords, color='blue', weight=2,
-                   fill=True, fill_opacity=0.1).add_to(m)
+    # # ─── 7) Draw map with two view options ─────────────────────────────────────
+    # center = manual_center if manual_center else depot_coord
+    # m = folium.Map(location=center, zoom_start=15, tiles=None)
+    # folium.TileLayer('OpenStreetMap', name='Map View', control=True).add_to(m)
+    # folium.TileLayer('Esri.WorldImagery', name='Satellite View', control=True).add_to(m)
+    # folium.Polygon(locations=fence_coords, color='blue', weight=2,
+    #                fill=True, fill_opacity=0.1).add_to(m)
 
-    # Add special marker for depot/starting point
-    folium.Marker(
-        location=depot_coord,
-        popup="Starting Point",
-        icon=folium.Icon(color='green', icon='play', prefix='fa')
-    ).add_to(m)
+    # # Add special marker for depot/starting point
+    # folium.Marker(
+    #     location=depot_coord,
+    #     popup="Starting Point",
+    #     icon=folium.Icon(color='green', icon='play', prefix='fa')
+    # ).add_to(m)
 
-    # Add house markers with their IDs
-    for hid, (lat, lon, house_id) in house_points.items():
-        folium.CircleMarker(
-            location=(lat, lon),
-            radius=4,
-            color='red',
-            fill=True,
-            fill_opacity=0.7,
-            popup=f"House ID: {house_id}"
-        ).add_to(m)
+    # # Add house markers with their IDs
+    # for hid, (lat, lon, house_id) in house_points.items():
+    #     folium.CircleMarker(
+    #         location=(lat, lon),
+    #         radius=4,
+    #         color='red',
+    #         fill=True,
+    #         fill_opacity=0.7,
+    #         popup=f"House ID: {house_id}"
+    #     ).add_to(m)
 
-    # Draw the route
-    route_coords = [coord for _, coord, _ in visit_sequence]
-    for a, b in zip(route_coords, route_coords[1:]):
-        n1 = ox.nearest_nodes(G, a[1], a[0])
-        n2 = ox.nearest_nodes(G, b[1], b[0])
-        try:
-            path = nx.shortest_path(G, n1, n2, weight='length')
-            seg = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path]
-            folium.PolyLine(locations=seg, color='black', weight=3).add_to(m)
-        except nx.NetworkXNoPath:
-            # If no path found, draw a direct line
-            folium.PolyLine(locations=[a, b], color='red', weight=3, dash_array='5').add_to(m)
+    # # Draw the route
+    # route_coords = [coord for _, coord, _ in visit_sequence]
+    # for a, b in zip(route_coords, route_coords[1:]):
+    #     n1 = ox.nearest_nodes(G, a[1], a[0])
+    #     n2 = ox.nearest_nodes(G, b[1], b[0])
+    #     try:
+    #         path = nx.shortest_path(G, n1, n2, weight='length')
+    #         seg = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path]
+    #         folium.PolyLine(locations=seg, color='black', weight=3).add_to(m)
+    #     except nx.NetworkXNoPath:
+    #         # If no path found, draw a direct line
+    #         folium.PolyLine(locations=[a, b], color='red', weight=3, dash_array='5').add_to(m)
 
-    # Add numbered markers for the visit sequence
-    for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence):
-        if idx > 0 and idx < len(visit_sequence) - 1:  # Skip depot markers (first and last)
-            folium.Marker(
-                location=(lat, lon),
-                popup=f"Stop {idx}: {house_id}",
-                icon=folium.DivIcon(
-                    html=f"<div style='font-size:10px;color:white;"
-                         f"background:red;border-radius:50%;width:24px;height:24px;"
-                         f"text-align:center;line-height:24px;'>{idx}</div>"
-                )
-            ).add_to(m)
+    # # Add numbered markers for the visit sequence
+    # for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence):
+    #     if idx > 0 and idx < len(visit_sequence) - 1:  # Skip depot markers (first and last)
+    #         folium.Marker(
+    #             location=(lat, lon),
+    #             popup=f"Stop {idx}: {house_id}",
+    #             icon=folium.DivIcon(
+    #                 html=f"<div style='font-size:10px;color:white;"
+    #                      f"background:red;border-radius:50%;width:24px;height:24px;"
+    #                      f"text-align:center;line-height:24px;'>{idx}</div>"
+    #             )
+    #         ).add_to(m)
 
-    folium.LayerControl().add_to(m)
+    # folium.LayerControl().add_to(m)
 
-    # Save map to a string
-    map_html = m._repr_html_()
+    # # Save map to a string
+    # map_html = m._repr_html_()
 
     # ─── 8) Create route sequence data ─────────────────────────────────────────────
-    seq_df = pd.DataFrame([
-        {"Stop": idx,
-         "Label": 'Depot' if label == 'Depot' else f'House {label}',
-         "House_ID": house_id,
-         "Latitude": lat,
-         "Longitude": lon}
-        for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence)
-    ])
+    stops_data = [
+    {"Stop": idx,
+     "Label": 'Depot' if label == 'Depot' else f'House {label}',
+     "House_ID": house_id,
+     "Latitude": lat,
+     "Longitude": lon}
+    for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence)
+]
 
-    # Convert to CSV string
-    csv_string = seq_df.to_csv(index=False)
 
-    # ─── 9) Generate Google Maps link ───────────────────────────────────────────
-    g_coords = [depot_coord] + [coord for _, coord, _ in visit_sequence[1:-1]] + [depot_coord]
-    gmap_url = "https://www.google.com/maps/dir/" + "/".join(f"{lat},{lon}" for lat, lon in g_coords)
+    # # ─── 9) Generate Google Maps link ───────────────────────────────────────────
+    # g_coords = [depot_coord] + [coord for _, coord, _ in visit_sequence[1:-1]] + [depot_coord]
+    # gmap_url = "https://www.google.com/maps/dir/" + "/".join(f"{lat},{lon}" for lat, lon in g_coords)
 
     # ─── 10) Create pathway with House IDs ─────────────────────────────────────
     pathway = []
@@ -241,13 +239,11 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
 
     # Prepare response data
     response = {
-        "status": "success",
-        "stops": seq_df.to_dict(orient='records'),
-        "depot": {"lat": depot_coord[0], "lon": depot_coord[1]},
-        "google_maps_url": gmap_url,
-        "map_html": map_html,
-        "route_sequence_csv": csv_string,
-        "pathway": pathway
-    }
+    "status": "success",
+    "stops": stops_data,
+    "depot": {"lat": depot_coord[0], "lon": depot_coord[1]},
+    "pathway": pathway
+}
+
 
     return response
