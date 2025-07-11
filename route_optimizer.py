@@ -116,8 +116,10 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
 
     visit_sequence.append(('Depot', depot_coord, 'Ending Point'))
 
-    # ─── 7) Construct full road-following path ───────────────────────────────────
+    # ─── 7) Construct full road-following path and compute distance ──────────────
     full_route_path = []
+    total_distance_meters = 0
+
     route_coords = [coord for _, coord, _ in visit_sequence]
 
     for a, b in zip(route_coords, route_coords[1:]):
@@ -127,6 +129,12 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
             path = nx.shortest_path(G, n1, n2, weight='length')
             segment = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path]
             full_route_path.extend(segment)
+
+            # Add segment distance
+            segment_lengths = [G[u][v][0]['length'] for u, v in zip(path[:-1], path[1:])]
+            total_distance_meters += sum(segment_lengths)
+
+
         except nx.NetworkXNoPath:
             full_route_path.append((a[0], a[1]))
             full_route_path.append((b[0], b[1]))
@@ -135,7 +143,14 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         {"lat": lat, "lon": lon} for lat, lon in full_route_path
     ]
 
-    # ─── 8) Pathway description ──────────────────────────────────────────────────
+    # ─── 8) Calculate Total Time Estimate ───────────────────────────────────────
+    total_distance_km = total_distance_meters / 1000
+    avg_speed_kmph = 20  # assumed average speed
+    drive_time_minutes = (total_distance_km / avg_speed_kmph) * 60
+    wait_time_minutes = 2 * (len(visit_sequence) - 2)  # exclude start and end depot
+    total_time_minutes = drive_time_minutes + wait_time_minutes
+
+    # ─── 9) Pathway Description ────────────────────────────────────────────────
     pathway = []
     for idx, (label, _, house_id) in enumerate(visit_sequence):
         if idx == 0:
@@ -145,7 +160,7 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         else:
             pathway.append(f"Stop {idx}: Visit {house_id}")
 
-    # ─── 9) Stops summary ────────────────────────────────────────────────────────
+    # ─── 10) Stops Summary ─────────────────────────────────────────────────────
     stops_data = [
         {"Stop": idx,
          "Label": 'Depot' if label == 'Depot' else f'House {label}',
@@ -155,18 +170,20 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence)
     ]
 
-    # ─── 10) Google Maps link ────────────────────────────────────────────────────
+    # ─── 11) Google Maps Link ──────────────────────────────────────────────────
     g_coords = [depot_coord] + [coord for _, coord, _ in visit_sequence[1:-1]] + [depot_coord]
     gmap_url = "https://www.google.com/maps/dir/" + "/".join(f"{lat},{lon}" for lat, lon in g_coords)
 
-    # ─── Final Response ──────────────────────────────────────────────────────────
+    # ─── Final Response ────────────────────────────────────────────────────────
     response = {
         "status": "success",
         "stops": stops_data,
         "depot": {"lat": depot_coord[0], "lon": depot_coord[1]},
         "google_maps_url": gmap_url,
         "pathway": pathway,
-        "route_path": full_route_coords
+        "route_path": full_route_coords,
+        "total_distance_km": round(total_distance_km, 2),
+        "estimated_total_time_min": round(total_time_minutes, 2)
     }
 
     return response
