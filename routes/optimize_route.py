@@ -56,7 +56,12 @@ def optimize_route():
                 # Use IP geolocation service to get location
                 # Note: In production, use a more reliable service with API key
                 if client_ip != '127.0.0.1' and client_ip != 'localhost':
-                    geo_response = requests.get(f'https://ipapi.co/{client_ip}/json/')
+                    try:
+                        geo_response = requests.get(f'https://ipapi.co/{client_ip}/json/', timeout=3)
+                    except Exception as e:
+                        print(f"[WARNING] IP lookup failed: {e}")
+                        geo_response = None
+
                     if geo_response.status_code == 200:
                         location_data = geo_response.json()
                         current_location = {
