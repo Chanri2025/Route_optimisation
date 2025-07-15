@@ -1,46 +1,43 @@
 import pandas as pd
-import numpy as np
 import networkx as nx
 import osmnx as ox
 from shapely.geometry import Point, Polygon
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
-from datetime import datetime
 
 def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_center=None, current_location=None):
-    # ─── 1) Parse geofence polygon ───────────────────────────────────────────
-    fence_coords = [tuple(map(float, p.split(','))) for p in geofence_str.split(';')]
+    if not geofence_str or not house_coords:
+        return {
+            "status": "error",
+            "message": "Missing required fields: 'geofence' and/or 'houses'"
+        }
+
+    try:
+        fence_coords = [tuple(map(float, p.split(','))) for p in geofence_str.split(';')]
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Invalid geofence format: {e}"
+        }
+
     polygon = Polygon([(lon, lat) for lat, lon in fence_coords])
 
-    # ─── 2) Process house stops ───────────────────────────────────────────────
+    # Process house DataFrame
     df_h = pd.DataFrame(house_coords)
-
     lat_col = 'lat' if 'lat' in df_h.columns else [c for c in df_h.columns if 'lat' in c.lower()][0]
     lon_col = 'lon' if 'lon' in df_h.columns else [c for c in df_h.columns if 'lon' in c.lower()][0]
-
-    if 'house_id' in df_h.columns:
-        id_col = 'house_id'
-    else:
+    if 'house_id' not in df_h.columns:
         df_h['house_id'] = df_h.index
-        id_col = 'house_id'
-
-    df_h['inside'] = df_h.apply(
-        lambda r: polygon.covers(Point(r[lon_col], r[lat_col])),
-        axis=1
-    )
+    df_h['inside'] = df_h.apply(lambda r: polygon.covers(Point(r[lon_col], r[lat_col])), axis=1)
     df_h = df_h[df_h['inside']].reset_index(drop=True)
     df_h['HouseID'] = df_h.index
 
-    house_points = {
-        row.HouseID: (getattr(row, lat_col), getattr(row, lon_col), getattr(row, id_col))
-        for row in df_h.itertuples()
-    }
+    # G = ox.graph_from_polygon(polygon, network_type='drive')
+    polygon_buffered = polygon.buffer(0.001)  # ~100 meters
+    G = ox.graph_from_polygon(polygon_buffered, network_type='drive')
 
-    # ─── 3) Download road network ───────────────────────────────────────────────
-    print('Downloading OSM road network...')
-    G = ox.graph_from_polygon(polygon, network_type='drive')
 
-    # ─── 4) Determine depot location ────────────────────────────────────────────
+    # Determine depot
     if current_location and 'lat' in current_location and 'lon' in current_location:
         depot_coord = (current_location['lat'], current_location['lon'])
         current_point = Point(current_location['lon'], current_location['lat'])
@@ -51,14 +48,36 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         depot_pt = polygon.centroid
         depot_coord = (depot_pt.y, depot_pt.x)
 
-    depot_node = ox.nearest_nodes(G, depot_coord[1], depot_coord[0])
+    try:
+        depot_node = ox.nearest_nodes(G, depot_coord[1], depot_coord[0])
+    except:
+        return {
+            "status": "error",
+            "message": "Depot location is unreachable on the road network."
+        }
 
-    house_nodes = {
-        hid: ox.nearest_nodes(G, lon, lat)
-        for hid, (lat, lon, _) in house_points.items()
-    }
+    # Snap houses and filter unreachable ones
+    house_points = {}
+    house_nodes = {}
+    unreachable_houses = []
 
-    # ─── 5) Nearest-Neighbor seed ───────────────────────────────────────────────
+    for row in df_h.itertuples():
+        lat, lon = getattr(row, lat_col), getattr(row, lon_col)
+        try:
+            node = ox.nearest_nodes(G, lon, lat)
+            house_points[row.HouseID] = (lat, lon, row.house_id)
+            house_nodes[row.HouseID] = node
+        except:
+            unreachable_houses.append({"house_id": row.house_id, "lat": lat, "lon": lon})
+            print(f"[SKIP] House {row.house_id} at ({lat},{lon}) not reachable by road.")
+
+    if not house_points:
+        return {
+            "status": "error",
+            "message": "No reachable house points found in the road network."
+        }
+
+    # Nearest-neighbor seeding
     visit_sequence = [('Depot', depot_coord, 'Starting Point')]
     visited = set()
     current_node = depot_node
@@ -73,7 +92,7 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         current_node = house_nodes[next_hid]
         visit_sequence.append((next_hid, house_points[next_hid][:2], house_points[next_hid][2]))
 
-    # ─── 6) OR-Tools TSP on remaining ────────────────────────────────────────────
+    # TSP with OR-Tools
     remaining = [hid for hid in house_points if hid not in visited]
     MAX_LOCS = 59
     rem_limit = remaining[:MAX_LOCS - 1] if len(remaining) + 1 > MAX_LOCS else remaining
@@ -85,14 +104,12 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
         for i in range(size):
             dlocs = nx.single_source_dijkstra_path_length(G, sub_nodes[i], weight='length')
             for j in range(size):
-                matrix[i][j] = int(dlocs.get(sub_nodes[j], 0))
+                matrix[i][j] = int(dlocs.get(sub_nodes[j], float('inf')))
 
         mgr = pywrapcp.RoutingIndexManager(size, 1, 0)
         tsp = pywrapcp.RoutingModel(mgr)
 
-        def dist_cb(i, j):
-            return matrix[mgr.IndexToNode(i)][mgr.IndexToNode(j)]
-
+        def dist_cb(i, j): return matrix[mgr.IndexToNode(i)][mgr.IndexToNode(j)]
         transit = tsp.RegisterTransitCallback(dist_cb)
         tsp.SetArcCostEvaluatorOfAllVehicles(transit)
 
@@ -116,74 +133,78 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
 
     visit_sequence.append(('Depot', depot_coord, 'Ending Point'))
 
-    # ─── 7) Construct full road-following path and compute distance ──────────────
+    # Build route path
+    route_coords = [coord for _, coord, _ in visit_sequence]
     full_route_path = []
     total_distance_meters = 0
 
-    route_coords = [coord for _, coord, _ in visit_sequence]
-
     for a, b in zip(route_coords, route_coords[1:]):
-        n1 = ox.nearest_nodes(G, a[1], a[0])
-        n2 = ox.nearest_nodes(G, b[1], b[0])
         try:
+            n1 = ox.nearest_nodes(G, a[1], a[0])
+            n2 = ox.nearest_nodes(G, b[1], b[0])
             path = nx.shortest_path(G, n1, n2, weight='length')
             segment = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path]
             full_route_path.extend(segment)
-
-            # Add segment distance
             segment_lengths = [G[u][v][0]['length'] for u, v in zip(path[:-1], path[1:])]
             total_distance_meters += sum(segment_lengths)
+        except:
+            print(f"[WARNING] No road path from {a} to {b} — segment skipped.")
 
+    full_route_coords = [{"lat": lat, "lon": lon} for lat, lon in full_route_path]
 
-        except nx.NetworkXNoPath:
-            full_route_path.append((a[0], a[1]))
-            full_route_path.append((b[0], b[1]))
-
-    full_route_coords = [
-        {"lat": lat, "lon": lon} for lat, lon in full_route_path
-    ]
-
-    # ─── 8) Calculate Total Time Estimate ───────────────────────────────────────
+    # Speed profile
     total_distance_km = total_distance_meters / 1000
-    avg_speed_kmph = 20  # assumed average speed
-    drive_time_minutes = (total_distance_km / avg_speed_kmph) * 60
-    wait_time_minutes = 2 * (len(visit_sequence) - 2)  # exclude start and end depot
-    total_time_minutes = drive_time_minutes + wait_time_minutes
+    num_stops = len(visit_sequence) - 2
+    wait_time_minutes = 2 * num_stops
+    speed_profiles = []
+    for speed in [10, 20, 30, 40]:
+        drive_time_min = (total_distance_km / speed) * 60
+        total_time_min = drive_time_min + wait_time_minutes
+        speed_profiles.append({
+            "speed_kmph": speed,
+            "distance_km": round(total_distance_km, 2),
+            "time_minutes": round(total_time_min, 2)
+        })
 
-    # ─── 9) Pathway Description ────────────────────────────────────────────────
+    # Stops + pathway
+    stops_data = []
     pathway = []
-    for idx, (label, _, house_id) in enumerate(visit_sequence):
+    for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence):
         if idx == 0:
-            pathway.append(f"Start at Depot")
+            pathway.append("Start at Depot")
         elif idx == len(visit_sequence) - 1:
-            pathway.append(f"Return to Depot")
+            pathway.append("Return to Depot")
         else:
             pathway.append(f"Stop {idx}: Visit {house_id}")
 
-    # ─── 10) Stops Summary ─────────────────────────────────────────────────────
-    stops_data = [
-        {"Stop": idx,
-         "Label": 'Depot' if label == 'Depot' else f'House {label}',
-         "House_ID": house_id,
-         "Latitude": lat,
-         "Longitude": lon}
-        for idx, (label, (lat, lon), house_id) in enumerate(visit_sequence)
-    ]
+        stops_data.append({
+            "Stop": idx,
+            "Label": 'Depot' if label == 'Depot' else f'House {label}',
+            "House_ID": house_id,
+            "Latitude": lat,
+            "Longitude": lon,
+            "reachable": True  # these are all reachable by design
+        })
 
-    # ─── 11) Google Maps Link ──────────────────────────────────────────────────
+    for h in unreachable_houses:
+        stops_data.append({
+            "Stop": None,
+            "Label": "Unreachable",
+            "House_ID": h["house_id"],
+            "Latitude": h["lat"],
+            "Longitude": h["lon"],
+            "reachable": False
+        })
+
     g_coords = [depot_coord] + [coord for _, coord, _ in visit_sequence[1:-1]] + [depot_coord]
     gmap_url = "https://www.google.com/maps/dir/" + "/".join(f"{lat},{lon}" for lat, lon in g_coords)
 
-    # ─── Final Response ────────────────────────────────────────────────────────
-    response = {
+    return {
         "status": "success",
         "stops": stops_data,
         "depot": {"lat": depot_coord[0], "lon": depot_coord[1]},
         "google_maps_url": gmap_url,
         "pathway": pathway,
         "route_path": full_route_coords,
-        "total_distance_km": round(total_distance_km, 2),
-        "estimated_total_time_min": round(total_time_minutes, 2)
+        "speed_profiles": speed_profiles
     }
-
-    return response
