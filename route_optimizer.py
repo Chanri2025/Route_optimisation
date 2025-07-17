@@ -166,7 +166,7 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
     # Speed profile
     total_distance_km = total_distance_meters / 1000
     num_stops = len(visit_sequence) - 2
-    wait_time_minutes = 2 * num_stops
+    wait_time_minutes = 0 * num_stops
     speed_profiles = []
     for speed in [10, 20, 30, 40]:
         drive_time_min = (total_distance_km / speed) * 60
