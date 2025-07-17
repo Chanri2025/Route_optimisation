@@ -2,6 +2,7 @@ import pandas as pd
 import networkx as nx
 import osmnx as ox
 from shapely.geometry import Point, Polygon
+from shapely.ops import nearest_points
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
@@ -32,18 +33,28 @@ def process_route_optimization(geofence_str, house_coords, nn_steps=0, manual_ce
     df_h = df_h[df_h['inside']].reset_index(drop=True)
     df_h['HouseID'] = df_h.index
 
-    # G = ox.graph_from_polygon(polygon, network_type='drive')
-    polygon_buffered = polygon.buffer(0.001)  # ~100 meters
-    G = ox.graph_from_polygon(polygon_buffered, network_type='drive')
+    # Default buffer
+    base_buffer_km = 0.1  # 100 meters
+
+    # If a depot was provided, calculate how far it is from the polygon
+    if current_location and 'lat' in current_location and 'lon' in current_location:
+        depot_point = Point(current_location['lon'], current_location['lat'])
+        nearest_on_polygon = nearest_points(depot_point, polygon)[1]
+        distance_deg = depot_point.distance(nearest_on_polygon)
+        buffer_deg = max(base_buffer_km / 111, distance_deg + 0.001)  # add 100m safety
+        print(f"[INFO] Using buffer: {buffer_deg:.6f} degrees (~{buffer_deg * 111:.1f} meters)")
+    else:
+        buffer_deg = base_buffer_km / 111
+
+    # Build the OSM graph using dynamic buffer
+    G = ox.graph_from_polygon(polygon.buffer(buffer_deg), network_type='drive')
 
 
     # Determine depot
     if current_location and 'lat' in current_location and 'lon' in current_location:
         depot_coord = (current_location['lat'], current_location['lon'])
         current_point = Point(current_location['lon'], current_location['lat'])
-        if not polygon.covers(current_point):
-            nearest_point = polygon.exterior.interpolate(polygon.exterior.project(current_point))
-            depot_coord = (nearest_point.y, nearest_point.x)
+        
     else:
         depot_pt = polygon.centroid
         depot_coord = (depot_pt.y, depot_pt.x)
