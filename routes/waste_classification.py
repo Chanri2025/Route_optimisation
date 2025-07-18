@@ -87,6 +87,7 @@ def predict():
             "house_id": house_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "counts": filtered_counts,
+            "inference": "segregated" if len(filtered_detections) == 1 else "Non - Segregated",
             "detections": filtered_detections
         }
 
