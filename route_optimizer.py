@@ -1,195 +1,164 @@
-import math
-import os
-import json
-import pandas as pd
-import requests
-from shapely.geometry import Point, Polygon
-from dotenv import load_dotenv
-from ortools.constraint_solver import routing_enums_pb2, pywrapcp
+def process_route_optimization(geofence_str, house_coords, current_location, dump_coords, batch_size):
+    import pandas as pd
+    import networkx as nx
+    import osmnx as ox
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import nearest_points
+    from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 
-# Load API key(s) from .env
-load_dotenv()
-API_KEYS = json.loads(os.getenv("API_KEY", "[]"))
-API_KEY = API_KEYS[0] if API_KEYS else None
+    fence_coords = [tuple(map(float, p.split(','))) for p in geofence_str.split(';')]
+    polygon = Polygon([(lon, lat) for lat, lon in fence_coords])
 
+    max_dist_m = 0
+    for dlat, dlon in dump_coords:
+        dump_point = Point(dlon, dlat)
+        nearest_on_poly = nearest_points(polygon, dump_point)[0]
+        dist_m = dump_point.distance(nearest_on_poly) * 111139
+        max_dist_m = max(max_dist_m, dist_m)
+    buffer_deg = (max_dist_m + 100) / 111139
+    polygon_buffered = polygon.buffer(buffer_deg)
 
-def get_route_with_api(coords, api_key):
-    """
-    Get road-following route path using OpenRouteService API
-    :param coords: List of (lat, lon) tuples
-    :return: List of {'lat', 'lon'} points along the route or fallback
-    """
-    if len(coords) < 2 or not api_key:
-        print("Skipping routing: not enough coordinates or API key missing.")
-        return [{'lat': lat, 'lon': lon} for lat, lon in coords]
-
-    try:
-        ors_coords = [[float(lon), float(lat)] for lat, lon in coords]
-    except Exception as e:
-        print(f"Invalid coordinate format: {e}")
-        return [{'lat': lat, 'lon': lon} for lat, lon in coords]
-
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
-    headers = {
-        "Authorization": api_key,
-        "Content-Type": "application/json"
-    }
-    body = {
-        "coordinates": ors_coords
-    }
-
-    try:
-        resp = requests.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-
-        # Check if response has features
-        if "features" in data and data["features"]:
-            geometry = data["features"][0]["geometry"]["coordinates"]
-            return [{'lat': lat, 'lon': lon} for lon, lat in geometry]
-        else:
-            print("OpenRouteService returned no features.")
-            print("Response:", json.dumps(data, indent=2))
-            return [{'lat': lat, 'lon': lon} for lat, lon in coords]
-
-    except requests.exceptions.RequestException as e:
-        print("Routing API error:", e)
-        print("Request payload:", json.dumps(body))
-        try:
-            print("Response content:", resp.text)
-        except:
-            pass
-        return [{'lat': lat, 'lon': lon} for lat, lon in coords]
-
-
-def process_route_optimization(
-        geofence_str: str,
-        house_coords: list,
-        start_location: dict,
-        dump_location: dict,
-        batch_size: int = None,
-        nn_steps: int = 0,
-        manual_center=None
-):
-    try:
-        pts = [tuple(map(float, p.split(","))) for p in geofence_str.split(";")]
-        polygon = Polygon([(lon, lat) for lat, lon in pts])
-    except Exception as e:
-        return {"status": "error", "message": f"Invalid geofence: {e}"}
+    G = ox.graph_from_polygon(polygon_buffered, network_type='drive')
 
     df = pd.DataFrame(house_coords)
-    if not {"lat", "lon"}.issubset(df.columns):
-        return {"status": "error", "message": "houses must include 'lat' & 'lon'"}
-    if 'house_id' not in df.columns:
-        df['house_id'] = df.index.astype(str)
     df['inside'] = df.apply(lambda r: polygon.covers(Point(r['lon'], r['lat'])), axis=1)
     df = df[df['inside']].reset_index(drop=True)
-    if df.empty:
-        return {"status": "error", "message": "No houses inside geofence"}
+    df['HouseID'] = df.index
 
-    start = (start_location['lat'], start_location['lon'])
-    dump = (dump_location['lat'], dump_location['lon'])
-    houses = df[['house_id', 'lat', 'lon']].to_dict(orient='records')
-    id_to_idx = {h['house_id']: i for i, h in enumerate(houses)}
-    coords = [start] + [(h['lat'], h['lon']) for h in houses] + [dump]
-    N = len(coords)
+    house_points = {
+        row.HouseID: (row.lat, row.lon, getattr(row, 'house_id', f"House-{row.HouseID}"))
+        for row in df.itertuples()
+    }
+    house_queue = list(house_points.items())
 
-    dist = [[0.0] * N for _ in range(N)]
-    for i in range(N):
-        for j in range(N):
-            if i != j:
-                dy_deg = coords[i][0] - coords[j][0]
-                dx_deg = coords[i][1] - coords[j][1]
-                dy_m = dy_deg * 111000
-                dx_m = dx_deg * 111000 * math.cos(math.radians((coords[i][0] + coords[j][0]) / 2))
-                dist[i][j] = math.hypot(dy_m, dx_m)
+    depot_coord = (current_location['lat'], current_location['lon']) if current_location else (polygon.centroid.y, polygon.centroid.x)
+    current_coord = depot_coord
 
-    all_ids = [h['house_id'] for h in houses]
-    if not batch_size or batch_size < 1:
-        batch_size = len(all_ids)
-    batches = [all_ids[i:i + batch_size] for i in range(0, len(all_ids), batch_size)]
+    batches = []
+    batch_idx = 0
 
-    results = []
-    for b_idx, batch in enumerate(batches):
-        subs = [0] + [1 + id_to_idx[hid] for hid in batch] + [N - 1]
-        M = len(subs)
-        sub_dist = [[dist[subs[i]][subs[j]] for j in range(M)] for i in range(M)]
+    while house_queue:
+        current_batch = house_queue[:batch_size]
+        house_queue = house_queue[batch_size:]
 
-        mgr = pywrapcp.RoutingIndexManager(M, 1, [0], [M - 1])
-        routing = pywrapcp.RoutingModel(mgr)
-        transit_callback_idx = routing.RegisterTransitCallback(
-            lambda i, j: int(sub_dist[mgr.IndexToNode(i)][mgr.IndexToNode(j)])
-        )
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_idx)
+        batch_nodes = [ox.nearest_nodes(G, lon, lat) for _, (lat, lon, _) in current_batch]
+        start_node = ox.nearest_nodes(G, current_coord[1], current_coord[0])
+        nodes = [start_node] + batch_nodes
+
+        size = len(nodes)
+        matrix = [[0]*size for _ in range(size)]
+        for i in range(size):
+            dists = nx.single_source_dijkstra_path_length(G, nodes[i], weight='length')
+            for j in range(size):
+                matrix[i][j] = int(dists.get(nodes[j], float('inf')))
+
+        mgr = pywrapcp.RoutingIndexManager(size, 1, 0)
+        tsp = pywrapcp.RoutingModel(mgr)
+
+        def dist_cb(i, j): return matrix[mgr.IndexToNode(i)][mgr.IndexToNode(j)]
+        transit = tsp.RegisterTransitCallback(dist_cb)
+        tsp.SetArcCostEvaluatorOfAllVehicles(transit)
 
         params = pywrapcp.DefaultRoutingSearchParameters()
         params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
         params.time_limit.seconds = 5
-        sol = routing.SolveWithParameters(params)
 
-        order = []
+        sol = tsp.SolveWithParameters(params)
+
+        batch_visit_sequence = []
+        if batch_idx == 0:
+            batch_visit_sequence.append(('Depot', current_coord, 'Depot'))
+
         if sol:
-            index = routing.Start(0)
-            while not routing.IsEnd(index):
-                node = mgr.IndexToNode(index)
-                if 1 <= node < M - 1:
-                    order.append(batch[node - 1])
-                index = sol.Value(routing.NextVar(index))
+            idx = tsp.Start(0)
+            while not tsp.IsEnd(idx):
+                node = mgr.IndexToNode(idx)
+                if node > 0:
+                    hid, (lat, lon, house_id) = current_batch[node - 1]
+                    batch_visit_sequence.append((hid, (lat, lon), house_id))
+                    current_coord = (lat, lon)
+                idx = sol.Value(tsp.NextVar(idx))
+
+        # Dump yard selection
+        dump_coord = None
+        min_dist = float('inf')
+        for dlat, dlon in dump_coords:
+            try:
+                dnode = ox.nearest_nodes(G, dlon, dlat)
+                path = nx.shortest_path(G, nodes[-1], dnode, weight='length')
+                dist = sum(G[u][v][0]['length'] for u, v in zip(path[:-1], path[1:]))
+                if dist < min_dist:
+                    min_dist = dist
+                    dump_coord = (dlat, dlon)
+            except:
+                continue
+
+        if dump_coord:
+            batch_visit_sequence.append((f"Dump-{batch_idx+1}", dump_coord, "Dump Yard"))
+            current_coord = dump_coord  # IMPORTANT: Start next batch from here
         else:
-            order = batch[:]
+            batch_visit_sequence.append((f"Dump-{batch_idx+1}", current_coord, "Dump Yard"))
 
-        stops = []
-        stops.append({
-            'stop': 0,
-            'label': 'Start' if b_idx == 0 else 'Dump Yard',
-            'house_id': None,
-            'lat': coords[0][0],
-            'lon': coords[0][1]
-        })
-        for s, hid in enumerate(order, start=1):
-            idx = subs[s]
-            stops.append({
-                'stop': s,
-                'label': f'House {hid}',
-                'house_id': hid,
-                'lat': coords[idx][0],
-                'lon': coords[idx][1]
-            })
-        stops.append({
-            'stop': len(stops),
-            'label': 'Dump Yard',
-            'house_id': None,
-            'lat': dump[0],
-            'lon': dump[1]
-        })
+        # Build route path and stats
+        batch_route_path = []
+        total_dist = 0
+        for a, b in zip(batch_visit_sequence, batch_visit_sequence[1:]):
+            coord_a, coord_b = a[1], b[1]
+            try:
+                na = ox.nearest_nodes(G, coord_a[1], coord_a[0])
+                nb = ox.nearest_nodes(G, coord_b[1], coord_b[0])
+                path = nx.shortest_path(G, na, nb, weight='length')
+                seg = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path]
+                dist = sum(G[u][v][0]['length'] for u, v in zip(path[:-1], path[1:]))
+                batch_route_path.extend(seg)
+                total_dist += dist
+            except:
+                batch_route_path.extend([coord_a, coord_b])
 
-        # Routing
-        path_coords = [coords[i] for i in subs]
-        route_path = get_route_with_api(path_coords, API_KEY)
+        # Stops for frontend
+        stops = [
+            {
+                "stop": idx,
+                "label": label,
+                "house_id": house_id,
+                "lat": lat,
+                "lon": lon
+            }
+            for idx, (label, (lat, lon), house_id) in enumerate(batch_visit_sequence)
+        ]
 
-        total_m = 0.0
-        prev_idx = 0
-        for hid in order:
-            curr_idx = subs.index(1 + id_to_idx[hid])
-            total_m += sub_dist[prev_idx][curr_idx]
-            prev_idx = curr_idx
-        total_m += sub_dist[prev_idx][M - 1]
-        total_km = total_m / 1000.0
-
+        total_km = total_dist / 1000
+        wait_time_min = 0 * sum(1 for s in batch_visit_sequence if "House" in str(s[2]))
         speed_profiles = []
-        for sp in (10, 20, 30, 40):
-            t_min = (total_km / sp) * 60
+        for spd in [10, 20, 30, 40]:
+            drive_time = (total_km / spd) * 60
+            total_time = drive_time + wait_time_min
             speed_profiles.append({
-                'speed_kmph': sp,
-                'distance_km': round(total_km, 2),
-                'time_minutes': round(t_min, 2)
+                "speed_kmph": spd,
+                "distance_km": round(total_km, 2),
+                "time_minutes": round(total_time, 2)
             })
 
-        results.append({
-            'batch_index': b_idx,
-            'stops': stops,
-            'route_path': route_path,
-            'speed_profiles': speed_profiles
+        # pathway = []
+        # for i, (label, _, hid) in enumerate(batch_visit_sequence):
+        #     if i == 0 and label == "Depot":
+        #         pathway.append("Start at Depot")
+        #     elif "Dump" in str(label):
+        #         pathway.append("Go to Dump Yard")
+        #     else:
+        #         pathway.append(f"Stop {i}: Visit {hid}")
+
+        batches.append({
+            "batch_index": batch_idx + 1,
+            "stops": stops,
+            "route_path": [{"lat": lat, "lon": lon} for lat, lon in batch_route_path],
+            # "pathway": pathway,
+            "speed_profiles": speed_profiles
         })
 
-    return {'status': 'success', 'batches': results}
+        batch_idx += 1
+
+    return {
+        "status": "success",
+        "batches": batches
+    }
