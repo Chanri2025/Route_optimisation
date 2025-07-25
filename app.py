@@ -1,7 +1,7 @@
 from flask import Flask
 from flask_cors import CORS
 from routes.optimize_route import optimize_route_bp
-from routes.waste_classification import waste_classification_bp
+# from routes.waste_classification import waste_classification_bp
 
 
 def create_app():
@@ -11,7 +11,7 @@ def create_app():
 
     # Register blueprints
     app.register_blueprint(optimize_route_bp)
-    app.register_blueprint(waste_classification_bp)
+    # app.register_blueprint(waste_classification_bp)
 
     # Add root route
     @app.route('/')
