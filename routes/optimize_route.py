@@ -11,16 +11,22 @@ def optimize_route():
     # Required input fields
     geofence_str = data.get('geofence')
     houses_raw = data.get('houses')
-    start_loc = data.get('start_location')  # e.g., {"lat": ..., "lon": ...}
-    dump_loc = data.get('dump_location')    # e.g., {"lat": ..., "lon": ...}
+    start_loc = data.get('start_location')   # e.g., {"lat": ..., "lon": ...}
+    dump_loc = data.get('dump_location')     # e.g., {"lat": ..., "lon": ...}
+    garage_loc = data.get('end_location')    # Now mandatory (garage)
+
     batch_sz = data.get('batch_size', len(houses_raw))
 
     # Basic validation
-    if not (geofence_str and houses_raw and start_loc and dump_loc):
+    if not (geofence_str and start_loc and dump_loc and garage_loc):
         return jsonify({
             "status": "error",
-            "message": "Missing required fields: geofence, houses, start_location, dump_location"
+            "message": "Missing required fields: geofence, start_location, dump_location, end_location (garage)"
         }), 400
+
+    if not houses_raw:
+        # Skip batch generation but still do garage trip logic
+        house_coords = []
 
     # Parse dump location into list of [lat, lon]
     dump_coords = [[dump_loc['lat'], dump_loc['lon']]]
@@ -41,7 +47,8 @@ def optimize_route():
             house_coords=house_coords,
             current_location=start_loc,
             dump_coords=dump_coords,
-            batch_size=batch_sz
+            batch_size=batch_sz,
+            end_location=garage_loc  # Always passed now
         )
         return jsonify(result)
 
